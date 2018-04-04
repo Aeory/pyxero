@@ -1,7 +1,4 @@
-from __future__ import unicode_literals
-
 import json
-import requests
 import six
 
 from datetime import datetime
@@ -14,6 +11,7 @@ from .exceptions import (
     XeroUnauthorized
 )
 from .utils import singular, isplural, json_load_object_hook
+from aiohttp import ClientSession
 
 
 class BaseManager(object):
@@ -154,8 +152,9 @@ class BaseManager(object):
         # In python3 this seems to return a bytestring
         return six.u(tostring(root_elm))
 
-    def _parse_api_response(self, response, resource_name):
-        data = json.loads(response.text, object_hook=json_load_object_hook)
+   async def _parse_api_response(self, response, resource_name):
+
+        data = json.loads(await response.text, object_hook=json_load_object_hook)
         assert data['Status'] == 'OK', "Expected the API to say OK but received %s" % data['Status']
         try:
             return data[resource_name]
@@ -167,7 +166,7 @@ class BaseManager(object):
         Each of the decorated methods must return:
             uri, params, method, body, headers, singleobject
         """
-        def wrapper(*args, **kwargs):
+        async def wrapper(*args, **kwargs):
             timeout = kwargs.pop('timeout', None)
 
             uri, params, method, body, headers, singleobject = func(*args, **kwargs)
@@ -184,50 +183,54 @@ class BaseManager(object):
             # or individual user/partner
             headers['User-Agent'] = self.user_agent
 
-            response = getattr(requests, method)(
-                    uri, data=body, headers=headers, auth=self.credentials.oauth,
-                    params=params, timeout=timeout)
+            # response = getattr(requests, method)(
+            #         uri, data=body, )
 
-            if response.status_code == 200:
-                # If we haven't got XML or JSON, assume we're being returned a binary file
-                if not response.headers['content-type'].startswith('application/json'):
-                    return response.content
+            async with ClientSession() as session:
+                async with getattr(session, method)(
+                        uri, data=body, headers=headers, auth=self.credentials.oauth,
+                        params=params, timeout=timeout) as response:
 
-                return self._parse_api_response(response, self.name)
+                    if response.status == 200:
+                        # If we haven't got XML or JSON, assume we're being returned a binary file
+                        if not response.headers['content-type'].startswith('application/json'):
+                            return await response.read()
 
-            elif response.status_code == 204:
-                return response.content
+                        return self._parse_api_response(response, self.name)
 
-            elif response.status_code == 400:
-                raise XeroBadRequest(response)
+                    elif response.status == 204:
+                        return await response.read()
 
-            elif response.status_code == 401:
-                raise XeroUnauthorized(response)
+                    elif response.status == 400:
+                        raise XeroBadRequest(response)
 
-            elif response.status_code == 403:
-                raise XeroForbidden(response)
+                    elif response.status == 401:
+                        raise XeroUnauthorized(response)
 
-            elif response.status_code == 404:
-                raise XeroNotFound(response)
+                    elif response.status == 403:
+                        raise XeroForbidden(response)
 
-            elif response.status_code == 500:
-                raise XeroInternalError(response)
+                    elif response.status == 404:
+                        raise XeroNotFound(response)
 
-            elif response.status_code == 501:
-                raise XeroNotImplemented(response)
+                    elif response.status == 500:
+                        raise XeroInternalError(response)
 
-            elif response.status_code == 503:
-                # Two 503 responses are possible. Rate limit errors
-                # return encoded content; offline errors don't.
-                # If you parse the response text and there's nothing
-                # encoded, it must be a not-available error.
-                payload = parse_qs(response.text)
-                if payload:
-                    raise XeroRateLimitExceeded(response, payload)
-                else:
-                    raise XeroNotAvailable(response)
-            else:
-                raise XeroExceptionUnknown(response)
+                    elif response.status == 501:
+                        raise XeroNotImplemented(response)
+
+                    elif response.status == 503:
+                        # Two 503 responses are possible. Rate limit errors
+                        # return encoded content; offline errors don't.
+                        # If you parse the response text and there's nothing
+                        # encoded, it must be a not-available error.
+                        payload = parse_qs(response.text)
+                        if payload:
+                            raise XeroRateLimitExceeded(response, payload)
+                        else:
+                            raise XeroNotAvailable(response)
+                    else:
+                        raise XeroExceptionUnknown(response)
 
         return wrapper
 
